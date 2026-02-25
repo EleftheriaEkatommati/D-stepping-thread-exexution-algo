@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <float.h>
+#include <pthread.h>
 
 /*
  * ============================================================
@@ -52,9 +53,17 @@ typedef struct {
 typedef struct {
     int n, m;
     Edge** adj;
-    int* adj_size;
-    int* adj_cap;
+    int* adj_size; // number of edges in each adjacency list
+    int* adj_cap; // capacity of each adjacency list (for dynamic resizing)
 } Graph;
+
+
+
+//Pthread variables
+pthread_mutex_t dist_lock;   
+
+
+
 
 /* =========================
    Graph handling
@@ -143,10 +152,11 @@ Bucket* bucket_create(void) {
 void bucket_add(Bucket* b, int v) {
     if (b->size == b->capacity) {
         b->capacity *= 2;
-        b->v = realloc(b->v, b->capacity * sizeof(Vertex));
+        b->v = realloc(b->v, b->capacity * sizeof(Vertex)); 
     }
     b->v[b->size++].id = v;
 }
+
 
 /*
  * Ensures that the bucket array has at least
@@ -171,6 +181,7 @@ void ensure_bucket_array(Bucket*** B, int* Bsize, int idx) {
     * Computes single-source shortest paths
     * from vertex "source" using �-stepping.
     */
+   //DELTA is the parameter that determines the "light" and "heavy" edges. Edges with weight <= DELTA are considered light, while edges with weight > DELTA are considered heavy.
 void delta_stepping(Graph* g, int source, double DELTA) {
     int n = g->n;
 
@@ -194,16 +205,20 @@ void delta_stepping(Graph* g, int source, double DELTA) {
      * This loop is inherently sequential.
      */
     for (int i = 0; i < Bsize; i++) {
+        printf("----------------------------------------------------------------------------------\n");
         if (B[i]->size == 0) continue;
-
+        printf("B[%d] size: %d\n", i, B[i]->size); 
         /*
          * S = vertices settled for bucket i
          * (snapshot of the bucket contents)
          */
-        Bucket* S = bucket_create();
+        Bucket* S = bucket_create(); 
+        //here we create a new bucket S to hold the vertices that are currently being processed from bucket B[i]. This allows us to work with a stable set of vertices while we relax edges, even if new vertices are added to B[i] during the process.
+        //if we had the source node the
         for (int k = 0; k < B[i]->size; k++) {
             bucket_add(S, B[i]->v[k].id);
         }
+        
 
         /*
          * R = worklist used for repeated
@@ -213,6 +228,12 @@ void delta_stepping(Graph* g, int source, double DELTA) {
         for (int k = 0; k < S->size; k++) {
             bucket_add(R, S->v[k].id);
         }
+        //R is holding vertices that are being processed for the current bucket.
+        //B is holding the nodes that are in the current bucket 
+        //S is holding the nodes that are being processed for the current bucket  and it is filled with the nodes thatt are in the current bucket B, for source node  
+        // it will pass the light edge stage and not the heavy edge stage, for the other nodes it will pass both stages,
+        // then the bucket S will be empty but on the second stage the bucket S will be filled with the nodes that are in the current bucket B.
+
 
         /* Bucket i is now logically empty */
         B[i]->size = 0;
@@ -223,28 +244,73 @@ void delta_stepping(Graph* g, int source, double DELTA) {
          *   - Processing vertices from R
          *   - Relaxing outgoing light edges
          */
+
+
+        //Protect shared variables between nodes(Dist[],bucket list,R)  -Ria
+        //Each thread will take a part of R 
+    
         while (R->size > 0) {
+            printf(
+                "in the loop ------------------- \n"
+            );
+
+
+            for (int i=0; i<R->size; i++) {
+                printf("R->v[%d].id: %d\n", i, R->v[i].id);
+            }
+
+            
+            printf(" R size: %d\n", R->size);
+
+            // for (int j = 0; j < Bsize; j++) {
+            //     printf("B[%d] size: %d\n", j, B[j]->size);
+            // }
+            
             int u = R->v[--R->size].id;
+
+
+             // Debug print
+            printf("R->v[0].id: %d\n", R->v[0].id); // Debug print
+            printf("Processing vertex %d from bucket %d\n", u, i); // Debug print
+           
+
 
             for (int e = 0; e < g->adj_size[u]; e++) {
                 Edge edge = g->adj[u][e];
+                
                 if (edge.weight <= DELTA) {
-                    double nd = dist[u] + edge.weight;
+                    
+
+                    printf("Relaxing light edge (%d -> %d) with weight %.2f\n",
+                        u, edge.to, edge.weight); // Debug print
+
+
+                    double nd = dist[u] + edge.weight;  
                     if (nd < dist[edge.to]) {
-                        dist[edge.to] = nd;
-                        int bidx = (int)floor(nd / DELTA);
+                        dist[edge.to] = nd;         //lock -Ria
+                        int bidx = (int)floor(nd / DELTA);  
+
+                        printf("""Relaxing edge (%d -> %d) with weight %.2f: new distance = %.2f, bucket index = %d\n",
+                            u, edge.to, edge.weight, nd, bidx); // Debug print
+
+                            
+                        //lock  -Ria
                         ensure_bucket_array(&B, &Bsize, bidx); //this ensures that the bucket array is large enough to hold the new bucket index
 
+                        //lock  -Ria
                         if (bidx == i) {
-                            bucket_add(R, edge.to);
+                            bucket_add(R, edge.to);    
                         } else {
-                            bucket_add(B[bidx], edge.to);
+                            bucket_add(B[bidx], edge.to); // here the B bucket  is
                         }
+                        
                     }
                 }
             }
         }
 
+
+       
         /* -------- heavy edges (once) --------
          *
          * Secondary parallelization opportunity.
@@ -302,6 +368,7 @@ int main(int argc, char** argv) {
     int source = atoi(argv[2]);
     double DELTA = atof(argv[3]);
 
+    
     delta_stepping(g, source, DELTA);
     free_graph(g);
     return 0;

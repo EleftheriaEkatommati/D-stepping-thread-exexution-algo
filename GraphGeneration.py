@@ -4,8 +4,8 @@ import random
 # USER-ADJUSTABLE PARAMETERS
 # =========================
 
-NUM_VERTICES = 1000      # Number of vertices (N)
-NUM_EDGES = 5000         # Number of edges (M)
+NUM_VERTICES = 6      # Number of vertices (N)
+NUM_EDGES = 5         # Number of edges (M)
 
 DELTA = 1.0              # Delta parameter for delta-stepping
 P_LIGHT = 0.7            # Probability an edge is "light"
