@@ -75,9 +75,13 @@ typedef struct {
 	pthread_barrier_t barrier;    // Για τον συντονισμό των φάσεων
 
 	int current_bucket_idx; // Ποιον κάδο επεξεργαζόμαστε τώρα
-	int terminate;          // Σημαία για το πότε τελείωσαν όλα
-	int active_vertices;          // NEW: Count of vertices currently in all buckets
-    pthread_mutex_t lock_active;  // NEW: Mutex to protect that counter
+	//int terminate;          // Σημαία για το πότε τελείωσαν όλα
+	//Αυτα δεν τα χρησιμοποιουμε καπου
+	//int active_vertices;          // NEW: Count of vertices currently in all buckets
+    //pthread_mutex_t lock_active;  // NEW: Mutex to protect that counter
+
+	Bucket*** all_local_B;     // [num_threads][bucket_index]
+	int* all_local_Bsize;      // size for each thread
 }  SharedData ;
 
 typedef struct {
@@ -204,7 +208,7 @@ void ensure_bucket_array(Bucket*** B, int* Bsize, int idx) {
 
 
 
-
+//Each thread will run this method
 void * delta_stepping_thread(void* args){
 	ThreadArgs* t_args = (ThreadArgs*)args;  // the packet of arguments that we pass to the thread, it contains the shared data and the thread id
 	SharedData* sd = t_args->sd;  // the shared data that contains all the common resources that the threads will use
@@ -228,14 +232,19 @@ void * delta_stepping_thread(void* args){
 		// 	sd->B[i]->size = 0; 
 		// 	pthread_mutex_unlock(&sd->lock_buckets);
 		// }
-		int i = 0;
+	int i = 0;
+
+	//Local Buckets
+	Bucket** local_B = NULL;
+    int local_Bsize = 0;
+	sd->all_local_B[tid] = local_B;
+    sd->all_local_Bsize[tid] = local_Bsize;
+
 	while (1) {
 		pthread_barrier_wait(&sd->barrier);
-		
 		// Check for termination: Is the current bucket empty AND no more buckets have work?
 		// To keep it simple, we can have Thread 0 check if we've exceeded a reasonable range
 		// or if a global "empty" flag is set.
-		
 		if (tid == 0) {
 			// Find the next non-empty bucket
 			while (i < *(sd->Bsize) && sd->B[i]->size == 0) {
@@ -243,34 +252,42 @@ void * delta_stepping_thread(void* args){
 			}
 			sd->current_bucket_idx = i; // Share the found index
 		}
-		
 		pthread_barrier_wait(&sd->barrier);
+
 		i = sd->current_bucket_idx; // Everyone moves to the next bucket that actually has work
 
+		//Exoume hdh edw break condition, xreiazomaste to terminate? tha prepei na to baloume kai sthn main sd.terminate=
 		if (i >= *(sd->Bsize)) break; // Termination condition
 
 		// --- PHASE 1: PREPARATION (Leader fills R and S from B[i]) ---
+		//R vertices for light relaxation / S vertices for heavy relaxation
 		if (tid == 0) {
-			pthread_mutex_lock(&sd->lock_buckets);
+			//pthread_mutex_lock(&sd->lock_buckets);
 			for (int j = 0; j < sd->B[i]->size; j++) {
 				int v = sd->B[i]->v[j].id;
 				bucket_add(sd->R, v);
 				bucket_add(sd->S, v);
 			}
 			sd->B[i]->size = 0;
-			pthread_mutex_unlock(&sd->lock_buckets);
+			//pthread_mutex_unlock(&sd->lock_buckets);
 		}
 		pthread_barrier_wait(&sd->barrier);
 		 //all the threads wait until the first thread has finished adding.
+		 //Που εχουμε βαλει να γινεται set to terminate flag?
+
+		/*
 		if (sd->terminate && i >= *(sd->Bsize)){ // if the first thread has set the terminate flag and we have processed all the buckets, we can terminate the threads
 			break;
 		}
+		*/
+
 		 /*
 		 * here we will proceed to the light edge relaxation
 		 * each thread will take a part of the vertices in R and relax their outgoing light edges
 		 * we need to protect the shared variables (dist and buckets) when we relax the edges, since multiple threads can try to update the same vertex or add the same vertex to a bucket at the same time
 		 * we can use mutexes to protect these shared variables
 		 */
+		//R size changes dynamically, We set while(1)->Loop while theres work to do/untill we break
 		while (1) {
 			int u = -1;
 			pthread_mutex_lock(&sd->lock_buckets); // one thread at a time will take a vertex from R to process it
@@ -294,21 +311,25 @@ void * delta_stepping_thread(void* args){
 
 						int bidx = (int)floor(new_dist / sd->delta);
                         
-                        pthread_mutex_lock(&sd->lock_buckets); // seconf mutex for locking the buckets  when we are adding a node to a bucket 
-                        ensure_bucket_array(&(sd->B), sd->Bsize, bidx);
+                        //pthread_mutex_lock(&sd->lock_buckets); // seconf mutex for locking the buckets  when we are adding a node to a bucket 
+                        //ensure_bucket_array(&(sd->B), sd->Bsize, bidx);
                         
                         if (bidx == i) // if the new bucket index is the same as the curent bucket index 
 						{
+							pthread_mutex_lock(&sd->lock_buckets);
                             bucket_add(sd->R, edge.to); // we add the vertex to R since it will be processed in the current bucket
                             bucket_add(sd->S, edge.to);  // we also add the vertex to S since it will be processed in the current bucket and we need to keep track of it for the heavy edge relaxation
-                        } 
+                        	pthread_mutex_unlock(&sd->lock_buckets);
+						} 
 						else
-						{
-                            bucket_add(sd->B[bidx], edge.to);
+						{	
+							ensure_bucket_array(&local_B, &local_Bsize, bidx);
+                            bucket_add(local_B[bidx], edge.to);
+							sd->all_local_B[tid] = local_B;
+                            sd->all_local_Bsize[tid] = local_Bsize;
                         }
-						pthread_mutex_unlock(&sd->lock_buckets);
-					}
-					else {
+
+					}else{
 						pthread_mutex_unlock(&sd->lock_dist);
 						 // if the new distance is not better, we can skip the rest of the loop
 					}
@@ -323,7 +344,30 @@ void * delta_stepping_thread(void* args){
 		*/
 		pthread_barrier_wait(&sd->barrier);
 
+		//Merge the local buckets(Only thread 0)
+		if (tid == 0) {
 
+            for (int t = 0; t < sd->num_threads; t++) {
+
+                Bucket** t_local = sd->all_local_B[t];
+                int t_size = sd->all_local_Bsize[t];
+
+                for (int j = 0; j < t_size; j++) {
+
+                    if (t_local[j] != NULL && t_local[j]->size > 0) {
+
+                        ensure_bucket_array(&(sd->B), sd->Bsize, j);
+
+                        for (int k = 0; k < t_local[j]->size; k++)
+                            bucket_add(sd->B[j], t_local[j]->v[k].id);
+
+                        t_local[j]->size = 0;
+                    }
+                }
+            }
+        }
+		pthread_barrier_wait(&sd->barrier);
+		//S is divided into fixed-size chunks, one per thread 
         int total_s = sd->S->size; // 
         int chunk = (total_s + sd->num_threads - 1) / sd->num_threads; // calculating the number of nodes in s that each thread  will process 
         int start = tid * chunk; // based on the thread id, we calculate the start and the end 
@@ -348,12 +392,14 @@ void * delta_stepping_thread(void* args){
 
                         int bidx = (int)floor(new_dist / sd->delta);
 
-                        pthread_mutex_lock(&sd->lock_buckets); // locking the buckets when we are adding a node to a bucket
+                        //pthread_mutex_lock(&sd->lock_buckets); // locking the buckets when we are adding a node to a bucket
 
-                        ensure_bucket_array(&(sd->B), sd->Bsize, bidx); // ensure that the bucket array is large enough to hold the new bucket index
-                        bucket_add(sd->B[bidx], edge.to);
-                        
-						pthread_mutex_unlock(&sd->lock_buckets);
+                        //ensure_bucket_array(&(sd->B), sd->Bsize, bidx); // ensure that the bucket array is large enough to hold the new bucket index
+                        //bucket_add(sd->B[bidx], edge.to);
+						ensure_bucket_array(&local_B, &local_Bsize, bidx);
+                        bucket_add(local_B[bidx], edge.to);
+                        sd->all_local_B[tid] = local_B;
+                        sd->all_local_Bsize[tid] = local_Bsize;
                     } else {
                         pthread_mutex_unlock(&sd->lock_dist);
                     }
@@ -361,12 +407,49 @@ void * delta_stepping_thread(void* args){
             }
 		}
 		pthread_barrier_wait(&sd->barrier);
+		//Final merge by thread 0
+		if (tid == 0) {
+
+            for (int t = 0; t < sd->num_threads; t++) {
+
+                Bucket** t_local = sd->all_local_B[t];
+                int t_size = sd->all_local_Bsize[t];
+
+                for (int j = 0; j < t_size; j++) {
+
+                    if (t_local[j] != NULL && t_local[j]->size > 0) {
+
+                        ensure_bucket_array(&(sd->B), sd->Bsize, j);
+
+                        for (int k = 0; k < t_local[j]->size; k++)
+                            bucket_add(sd->B[j], t_local[j]->v[k].id);
+
+                        t_local[j]->size = 0;
+                    }
+                }
+            }
+        }
+		//Clean R and S
+		pthread_barrier_wait(&sd->barrier);
         if (tid == 0) {
             sd->R->size = 0;
             sd->S->size = 0;
         }
         pthread_barrier_wait(&sd->barrier);
+		//Clear local buckets
+		for (int j = 0; j < local_Bsize; j++) {
+            if (local_B[j] != NULL)
+                local_B[j]->size = 0;
+        }
     }
+
+	 for (int j = 0; j < local_Bsize; j++) {
+        if (local_B[j] != NULL) {
+            free(local_B[j]->v);
+            free(local_B[j]);
+        }
+    }
+    free(local_B);
 
 	return NULL;
 }
@@ -423,6 +506,12 @@ int main(int argc, char** argv) {
 	pthread_mutex_init(&sd.lock_buckets, NULL);
 	pthread_barrier_init(&sd.barrier, NULL, num_threads);
 	
+	sd.all_local_B = malloc(num_threads * sizeof(Bucket**));
+	sd.all_local_Bsize = calloc(num_threads, sizeof(int));
+
+	for (int t = 0; t < num_threads; t++) {
+    	sd.all_local_B[t] = NULL;
+	}	
 
 	//Initialize the threads
 	pthread_t* threads = malloc(num_threads * sizeof(pthread_t));
@@ -468,5 +557,7 @@ int main(int argc, char** argv) {
         }
     }
     free(B);
+	free(sd.all_local_B);
+	free(sd.all_local_Bsize);
 	return 0;
 }
