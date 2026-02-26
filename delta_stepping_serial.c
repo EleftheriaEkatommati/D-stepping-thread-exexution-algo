@@ -4,6 +4,11 @@
 #include <float.h>
 #include <pthread.h>
 
+// how to run
+/*
+* Compile: gcc -o delta_stepping_serial delta_stepping_serial.c -lm
+* Run: ./delta_stepping_serial graph.txt source DELTA
+*/
 /*
  * ============================================================
  *  SERIAL �-STEPPING SINGLE-SOURCE SHORTEST PATHS
