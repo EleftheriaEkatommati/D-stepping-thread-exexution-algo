@@ -3,7 +3,7 @@
 #include <math.h>
 #include <float.h>
 #include <pthread.h>
-
+#include <sys/time.h>
 // how to run
 /*
 * Compile: gcc -o delta_stepping_serial delta_stepping_serial.c -lm
@@ -23,7 +23,7 @@
 
 #define INITIAL_ADJ_CAPACITY 4
 #define INITIAL_BUCKET_CAPACITY 4
-
+struct timeval start, end;
  /* =========================
     Data structures
     ========================= */
@@ -373,8 +373,14 @@ int main(int argc, char** argv) {
     int source = atoi(argv[2]);
     double DELTA = atof(argv[3]);
 
-    
+    gettimeofday(&start, NULL);
     delta_stepping(g, source, DELTA);
+    gettimeofday(&end, NULL);
+
+    double serial_time = (double)(end.tv_sec - start.tv_sec) + 
+                        (double)(end.tv_usec - start.tv_usec) / 1000000.0;
+
+    printf("Serial Delta-Stepping took: %.6f seconds\n", serial_time);
     free_graph(g);
     return 0;
 }
